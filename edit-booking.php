@@ -36,6 +36,8 @@ if ($bookingId <= 0) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
     $checkin = trim((string)($_POST['checkin'] ?? ''));
     $checkout = trim((string)($_POST['checkout'] ?? ''));
+    $notification_date = trim((string)($_POST['notification_date'] ?? ''));
+    $cancellation_date = trim((string)($_POST['cancellation_date'] ?? ''));
     $days = $_POST['days'] ?? [];
     $service_fee = in_array($_POST['service_fee'] ?? 'No', ['Yes','No']) ? $_POST['service_fee'] : 'No';
     $exclude_bank_holiday = in_array($_POST['exclude_bank_holiday'] ?? 'No', ['Yes','No']) ? $_POST['exclude_bank_holiday'] : 'No';
@@ -48,6 +50,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
     if (!($d1 && $d1->format('Y-m-d') === $checkin)) { $errors[] = 'Invalid check-in date.'; }
     if (!($d2 && $d2->format('Y-m-d') === $checkout)) { $errors[] = 'Invalid check-out date.'; }
     if (empty($errors) && $d2 <= $d1) { $errors[] = 'Checkout date must be greater than checkin date.'; }
+
+    // Validate notification_date if provided
+    $notification_date_val = null;
+    if ($notification_date !== '') {
+        $dn = DateTime::createFromFormat('Y-m-d', $notification_date);
+        if (!($dn && $dn->format('Y-m-d') === $notification_date)) {
+            $errors[] = 'Invalid notification date.';
+        } else {
+            $notification_date_val = $notification_date;
+        }
+    }
+
+    // Validate cancellation_date if provided
+    $cancellation_date_val = null;
+    if ($cancellation_date !== '') {
+        $dc = DateTime::createFromFormat('Y-m-d', $cancellation_date);
+        if (!($dc && $dc->format('Y-m-d') === $cancellation_date)) {
+            $errors[] = 'Invalid cancellation date.';
+        } else {
+            $cancellation_date_val = $cancellation_date;
+        }
+    }
 
     $validDays = ['mon','tue','wed','thu','fri','sat','sun'];
     $days = array_values(array_intersect($validDays, array_map('strtolower', $days)));
@@ -101,7 +125,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
         try {
             $pdo->beginTransaction();
 
-            $upd = $pdo->prepare("UPDATE bookings SET checkin = :checkin, checkout = :checkout, days = :days, service_fee = :service_fee, exclude_bank_holiday = :exclude_bank_holiday, payment_plan = :payment_plan WHERE id = :id");
+            $upd = $pdo->prepare("UPDATE bookings SET checkin = :checkin, checkout = :checkout, days = :days, service_fee = :service_fee, exclude_bank_holiday = :exclude_bank_holiday, payment_plan = :payment_plan, notification_date = :notification_date, cancellation_date = :cancellation_date WHERE id = :id");
             $upd->execute([
                 ':checkin' => $checkin,
                 ':checkout' => $checkout,
@@ -109,6 +133,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
                 ':service_fee' => $service_fee,
                 ':exclude_bank_holiday' => $exclude_bank_holiday,
                 ':payment_plan' => $payment_plan,
+                ':notification_date' => $notification_date_val,
+                ':cancellation_date' => $cancellation_date_val,
                 ':id' => $bookingId,
             ]);
 
@@ -164,6 +190,12 @@ if (empty($error)) {
 
             $checkin_dt = DateTime::createFromFormat('Y-m-d', $booking['checkin'] ?? '');
             $checkout_dt = DateTime::createFromFormat('Y-m-d', $booking['checkout'] ?? '');
+
+            // booking-level notification / cancellation dates (may be null)
+            $booking_notification_dt = DateTime::createFromFormat('Y-m-d', $booking['notification_date'] ?? '');
+            if ($booking_notification_dt instanceof DateTime) $booking_notification_dt = DateTimeImmutable::createFromMutable($booking_notification_dt);
+            $booking_cancellation_dt = DateTime::createFromFormat('Y-m-d', $booking['cancellation_date'] ?? '');
+            if ($booking_cancellation_dt instanceof DateTime) $booking_cancellation_dt = DateTimeImmutable::createFromMutable($booking_cancellation_dt);
 
             // load holidays between checkin (inclusive) and checkout (exclusive) when requested
             $holidays = [];
@@ -227,6 +259,23 @@ if (empty($error)) {
                     $effective_nights_until_notify = 0;
                 }
 
+                // compute effective cancellation end for this property when booking-level cancellation exists
+                $effective_cancel_end = null;
+                if (($p['is_cancelled'] ?? 'No') === 'Yes' && $booking_cancellation_dt instanceof DateTimeImmutable) {
+                    // how many days between booking notification_date and cancellation_date (guest's actual notice)
+                    $diffDays = 0;
+                    if ($booking_notification_dt instanceof DateTimeImmutable) {
+                        if ($booking_notification_dt <= $booking_cancellation_dt) {
+                            $diffDays = (int)$booking_notification_dt->diff($booking_cancellation_dt)->format('%a');
+                        }
+                    }
+
+                    $adjust = 0;
+                    if($ndays > 0 )
+                    $adjust = max(0, $ndays - $diffDays);
+                    $effective_cancel_end = $booking_cancellation_dt->modify("+{$adjust} days");
+                }
+
                 $perProperty[] = [
                     'id' => $p['id'] ?? null,
                     'title' => $p['title'] ?? '',
@@ -236,6 +285,7 @@ if (empty($error)) {
                     'notify_dt' => $notify_dt,
                     'notify_display_dt' => $notify_display_dt,
                     'nights_until_notify' => $effective_nights_until_notify,
+                    'effective_cancel_end' => $effective_cancel_end,
                 ];
             }
 
@@ -306,9 +356,9 @@ if (empty($error)) {
                 $final_wc = 0.0;
                 $service_wc = 0.0;
                 foreach ($perProperty as $pp) {
-                    if ($pp['is_cancelled'] === 'Yes' && $pp['notify_display_dt'] instanceof DateTimeImmutable) {
-                        // end for this property is min(period_end, notify_display_dt)
-                        $endForProp = $pp['notify_display_dt'] < $pe ? $pp['notify_display_dt'] : $pe;
+                    if ($pp['is_cancelled'] === 'Yes' && $pp['effective_cancel_end'] instanceof DateTimeImmutable) {
+                        // end for this property is min(period_end, effective_cancel_end)
+                        $endForProp = $pp['effective_cancel_end'] < $pe ? $pp['effective_cancel_end'] : $pe;
                         $nights_prop = $countEligibleNights($ps, $endForProp, $selectedDays, $holidays);
                     } else {
                         $nights_prop = $countEligibleNights($ps, $pe, $selectedDays, $holidays);
@@ -418,6 +468,18 @@ if (empty($error)) {
                             <option value="Monthly" <?= ($booking['payment_plan'] ?? 'Monthly') === 'Monthly' ? 'selected' : '' ?>>Monthly</option>
                             <option value="full" <?= ($booking['payment_plan'] ?? '') === 'full' ? 'selected' : '' ?>>full</option>
                         </select>
+                    </div>
+
+                    <div class="col-md-4">
+                        <label class="form-label">Notification Date</label>
+                        <input type="date" name="notification_date" id="notification_date" class="form-control" value="<?= htmlspecialchars($booking['notification_date'] ?? '', ENT_QUOTES) ?>">
+                        <small class="text-muted">When guest informs about cancellation</small>
+                    </div>
+
+                    <div class="col-md-4">
+                        <label class="form-label">Cancellation Date</label>
+                        <input type="date" name="cancellation_date" id="cancellation_date" class="form-control" value="<?= htmlspecialchars($booking['cancellation_date'] ?? '', ENT_QUOTES) ?>">
+                        <small class="text-muted">Real cancellation start date</small>
                     </div>
                 </div>
             </div>
@@ -586,13 +648,17 @@ if (empty($error)) {
                                 <?php
                                 $parts = [];
                                 foreach ($perProperty as $pp) {
-                                    if ($pp['is_cancelled'] === 'Yes' && $pp['notify_display_dt'] instanceof DateTimeImmutable) {
-                                        $endForProp = $pp['notify_display_dt'] < $pr['end'] ? $pp['notify_display_dt'] : $pr['end'];
+                                    if ($pp['is_cancelled'] === 'Yes' && $pp['effective_cancel_end'] instanceof DateTimeImmutable) {
+                                        $endForProp = $pp['effective_cancel_end'] < $pr['end'] ? $pp['effective_cancel_end'] : $pr['end'];
                                         $n = $countEligibleNights($pr['start'], $endForProp, $selectedDays, $holidays);
                                     } else {
                                         $n = $countEligibleNights($pr['start'], $pr['end'], $selectedDays, $holidays);
                                     }
-                                    $parts[] = htmlspecialchars($pp['title'] . ': ' . $n);
+                                    $ecLabel = '';
+                                    if ($pp['effective_cancel_end'] instanceof DateTimeImmutable) {
+                                        $ecLabel = ' (effective cancel: ' . $pp['effective_cancel_end']->format('d/m/Y') . ')';
+                                    }
+                                    $parts[] = htmlspecialchars($pp['title'] . ': ' . $n . $ecLabel);
                                 }
                                 echo implode(' / ', $parts);
                                 ?>

@@ -30,6 +30,8 @@ try {
             service_fee ENUM('No','Yes') NOT NULL DEFAULT 'No',
             exclude_bank_holiday ENUM('No','Yes') NOT NULL DEFAULT 'No',
             payment_plan ENUM('weekly','fortnighly','Monthly','full') NOT NULL DEFAULT 'Monthly',
+            notification_date DATE NULL,
+            cancellation_date DATE NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     ");
@@ -56,6 +58,8 @@ try {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
     $checkin = trim((string)($_POST['checkin'] ?? ''));
     $checkout = trim((string)($_POST['checkout'] ?? ''));
+    $notification_date = trim((string)($_POST['notification_date'] ?? ''));
+    $cancellation_date = trim((string)($_POST['cancellation_date'] ?? ''));
     $days = $_POST['days'] ?? [];
     $service_fee = in_array($_POST['service_fee'] ?? 'No', ['Yes','No']) ? $_POST['service_fee'] : 'No';
     $exclude_bank_holiday = in_array($_POST['exclude_bank_holiday'] ?? 'No', ['Yes','No']) ? $_POST['exclude_bank_holiday'] : 'No';
@@ -75,6 +79,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
     }
     if (empty($errors) && $d2 <= $d1) {
         $errors[] = 'Checkout date must be greater than checkin date.';
+    }
+
+    // Validate notification_date if provided
+    $notification_date_val = null;
+    if ($notification_date !== '') {
+        $dn = DateTime::createFromFormat('Y-m-d', $notification_date);
+        if (!($dn && $dn->format('Y-m-d') === $notification_date)) {
+            $errors[] = 'Invalid notification date.';
+        } else {
+            $notification_date_val = $notification_date;
+        }
+    }
+
+    // Validate cancellation_date if provided
+    $cancellation_date_val = null;
+    if ($cancellation_date !== '') {
+        $dc = DateTime::createFromFormat('Y-m-d', $cancellation_date);
+        if (!($dc && $dc->format('Y-m-d') === $cancellation_date)) {
+            $errors[] = 'Invalid cancellation date.';
+        } else {
+            $cancellation_date_val = $cancellation_date;
+        }
     }
 
     // Validate days (allow only known values)
@@ -131,7 +157,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
         try {
             $pdo->beginTransaction();
 
-            $insBooking = $pdo->prepare("INSERT INTO bookings (checkin, checkout, days, service_fee, exclude_bank_holiday, payment_plan) VALUES (:checkin, :checkout, :days, :service_fee, :exclude_bank_holiday, :payment_plan)");
+            $insBooking = $pdo->prepare("INSERT INTO bookings (checkin, checkout, days, service_fee, exclude_bank_holiday, payment_plan, notification_date, cancellation_date) VALUES (:checkin, :checkout, :days, :service_fee, :exclude_bank_holiday, :payment_plan, :notification_date, :cancellation_date)");
             $insBooking->execute([
                 ':checkin' => $checkin,
                 ':checkout' => $checkout,
@@ -139,6 +165,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
                 ':service_fee' => $service_fee,
                 ':exclude_bank_holiday' => $exclude_bank_holiday,
                 ':payment_plan' => $payment_plan,
+                ':notification_date' => $notification_date_val,
+                ':cancellation_date' => $cancellation_date_val,
             ]);
             $bookingId = (int)$pdo->lastInsertId();
 
