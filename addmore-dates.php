@@ -151,7 +151,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
 </head>
 <body>
 <div class="container py-4">
-    <h1 class="mb-4">Submit Multiple Dates</h1>
+    <div class="d-flex align-items-center mb-4">
+        <h1 class="me-auto mb-0">Save Holidays</h1>
+        <a href="index.php" class="btn btn-outline-secondary">Home</a>
+    </div>
 
     <?php if ($success): ?>
         <div class="alert alert-success" role="alert"><?= htmlspecialchars($success, ENT_QUOTES) ?></div>
