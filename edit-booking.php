@@ -170,6 +170,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
 /* Load booking & properties for display */
 $booking = null;
 $propertiesData = [];
+$showWithCancel = false;
 if (empty($error)) {
     try {
         $stmt = $pdo->prepare("SELECT * FROM bookings WHERE id = :id");
@@ -185,7 +186,6 @@ if (empty($error)) {
 
             // --- Payment plan calculations (upcoming payment details) ---
             $deposit_total = 0.0;
-            $notify_display_list = [];
             $today_dt = new DateTimeImmutable('today');
 
             $checkin_dt = DateTime::createFromFormat('Y-m-d', $booking['checkin'] ?? '');
@@ -248,7 +248,6 @@ if (empty($error)) {
 
                 // display notify (max of notify date and today) as requested
                 $notify_display_dt = $notify_dt ? ($today_dt > $notify_dt ? $today_dt : $notify_dt) : null;
-                $notify_display_list[] = $notify_display_dt ? $notify_display_dt->format('d/m/Y') : '';
 
                 // effective nights until notify (exclude nights from notify_display_dt onward)
                 if ($checkin_dt && $checkout_dt && $notify_display_dt) {
@@ -374,6 +373,8 @@ if (empty($error)) {
                     'deposit' => $deposit_row_wc, 'service_fee' => $service_wc, 'final_total' => $final_wc
                 ];
             }
+            // decide whether to show the "With Cancellation" table: booking has cancellation date and at least one property cancelled
+            $showWithCancel = ($booking_cancellation_dt instanceof DateTimeImmutable) && (count(array_filter($perProperty, function($pp){ return ($pp['is_cancelled'] ?? 'No') === 'Yes'; })) > 0);
             // --- end payment plan calculations ---
          }
      } catch (PDOException $e) {
@@ -585,7 +586,6 @@ if (empty($error)) {
                     <thead class="table-light">
                         <tr>
                             <th>Period</th>
-                            <th>Notify - Due (per property)</th>
                             <th>Deposit (£)</th>
                             <th>Service Fee (£)</th>
                             <th>Final Total (£)</th>
@@ -596,7 +596,6 @@ if (empty($error)) {
                         <?php foreach ($periodTotalsNoCancel as $i => $row): ?>
                         <tr>
                             <td><?= htmlspecialchars($row['start']->format('d/m/Y') . ' / ' . $row['end']->format('d/m/Y')) ?></td>
-                            <td><?= htmlspecialchars(implode(' / ', $notify_display_list)) ?></td>
                             <td>£<?= number_format($row['deposit'], 2) ?></td>
                             <td>£<?= number_format($row['service_fee'], 2) ?></td>
                             <td>£<?= number_format($row['final_total'], 2) ?></td>
@@ -607,7 +606,6 @@ if (empty($error)) {
                     <tfoot>
                         <tr class="fw-bold">
                             <td>Total</td>
-                            <td></td>
                             <td>£<?= number_format(array_sum(array_column($periodTotalsNoCancel, 'deposit')), 2) ?></td>
                             <td>£<?= number_format(array_sum(array_column($periodTotalsNoCancel, 'service_fee')), 2) ?></td>
                             <td>£<?= number_format(array_sum(array_column($periodTotalsNoCancel, 'final_total')), 2) ?></td>
@@ -618,16 +616,16 @@ if (empty($error)) {
             </div>
         </div>
 
+        <?php if (!empty($showWithCancel)): ?>
         <!-- Payment Plan: WITH Cancellation — periodized -->
         <div class="card mb-3">
             <div class="card-header">Payment Plan — With Cancellation</div>
             <div class="card-body">
-                <p class="small text-muted mb-2">For properties marked "Is Cancelled = Yes", nights after the notify-due (displayed above) are ignored.</p>
+                <p class="small text-muted mb-2">For properties marked "Is Cancelled = Yes", nights after the notify-due are ignored.</p>
                 <table class="table table-sm table-bordered">
                     <thead class="table-light">
                         <tr>
                             <th>Period</th>
-                            <th>Notify - Due (per property)</th>
                             <th>Deposit (£)</th>
                             <th>Service Fee (£)</th>
                             <th>Final Total (£)</th>
@@ -640,7 +638,6 @@ if (empty($error)) {
                         ?>
                         <tr>
                             <td><?= htmlspecialchars($pr['start']->format('d/m/Y') . ' / ' . $pr['end']->format('d/m/Y')) ?></td>
-                            <td><?= htmlspecialchars(implode(' / ', $notify_display_list)) ?></td>
                             <td>£<?= number_format($row['deposit'], 2) ?></td>
                             <td>£<?= number_format($row['service_fee'], 2) ?></td>
                             <td>£<?= number_format($row['final_total'], 2) ?></td>
@@ -669,7 +666,6 @@ if (empty($error)) {
                     <tfoot>
                         <tr class="fw-bold">
                             <td>Total</td>
-                            <td></td>
                             <td>£<?= number_format(array_sum(array_column($periodTotalsWithCancel, 'deposit')), 2) ?></td>
                             <td>£<?= number_format(array_sum(array_column($periodTotalsWithCancel, 'service_fee')), 2) ?></td>
                             <td>£<?= number_format(array_sum(array_column($periodTotalsWithCancel, 'final_total')), 2) ?></td>
@@ -679,6 +675,7 @@ if (empty($error)) {
                 </table>
             </div>
         </div>
+        <?php endif; ?>
 
         <div class="mb-3">
             <button type="submit" class="btn btn-primary">Update Booking</button>
