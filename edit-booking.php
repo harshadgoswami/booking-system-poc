@@ -43,7 +43,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
     $exclude_bank_holiday = in_array($_POST['exclude_bank_holiday'] ?? 'No', ['Yes','No']) ? $_POST['exclude_bank_holiday'] : 'No';
     $payment_plan = in_array($_POST['payment_plan'] ?? 'Monthly', ['weekly','fortnighly','Monthly','full']) ? $_POST['payment_plan'] : 'Monthly';
     $properties = $_POST['properties'] ?? [];
-
+    // paid periods from form (checkboxes named paid_periods[<index>]=1)
+    $paid_periods_raw = $_POST['paid_periods'] ?? [];
+    $paid_periods_post = [];
+    if (is_array($paid_periods_raw)) {
+        // keys are the period indexes that were checked
+        $paid_periods_post = array_map('intval', array_keys($paid_periods_raw));
+    }
     $errors = [];
     $d1 = DateTime::createFromFormat('Y-m-d', $checkin);
     $d2 = DateTime::createFromFormat('Y-m-d', $checkout);
@@ -156,6 +162,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
             }
 
             $pdo->commit();
+            // persist paid periods selection in session so the checked state survives the redirect
+            if (!empty($paid_periods_post)) {
+                $_SESSION['paid_periods_booking_' . $bookingId] = $paid_periods_post;
+            } else {
+                // clear any previous selection
+                unset($_SESSION['paid_periods_booking_' . $bookingId]);
+            }
             header('Location: edit-booking.php?bookingId=' . $bookingId . '&saved=1');
             exit;
         } catch (PDOException $e) {
@@ -190,6 +203,15 @@ if (empty($error)) {
 
             $checkin_dt = DateTime::createFromFormat('Y-m-d', $booking['checkin'] ?? '');
             $checkout_dt = DateTime::createFromFormat('Y-m-d', $booking['checkout'] ?? '');
+
+            // Xero invoice schedule: booking-level notify/due dates
+            $booking_notify_dt = null; // notify: checkin - 16 days
+            $booking_due_dt = null;    // due: checkin - 7 days
+            if ($checkin_dt instanceof DateTime) {
+                $checkin_imm = DateTimeImmutable::createFromMutable($checkin_dt);
+                $booking_notify_dt = $checkin_imm->modify('-16 days');
+                $booking_due_dt = $checkin_imm->modify('-7 days');
+            }
 
             // booking-level notification / cancellation dates (may be null)
             $booking_notification_dt = DateTime::createFromFormat('Y-m-d', $booking['notification_date'] ?? '');
@@ -259,20 +281,36 @@ if (empty($error)) {
                 }
 
                 // compute effective cancellation end for this property when booking-level cancellation exists
+                // If the property has its own checkout_date and it's earlier than the booking cancellation_date,
+                // use the property's checkout_date as the cancellation base for this property.
                 $effective_cancel_end = null;
+                // parse property's checkout_date (if any)
+                $prop_checkout_dt = null;
+                if (!empty($p['checkout_date'])) {
+                    $pc = DateTime::createFromFormat('Y-m-d', $p['checkout_date']);
+                    if ($pc instanceof DateTime) $prop_checkout_dt = DateTimeImmutable::createFromMutable($pc);
+                }
+
                 if (($p['is_cancelled'] ?? 'No') === 'Yes' && $booking_cancellation_dt instanceof DateTimeImmutable) {
-                    // how many days between booking notification_date and cancellation_date (guest's actual notice)
+                    // choose cancellation base: property checkout if earlier than booking cancellation
+                    $cancel_base = $booking_cancellation_dt;
+                    if ($prop_checkout_dt instanceof DateTimeImmutable && $prop_checkout_dt < $booking_cancellation_dt) {
+                        $cancel_base = $prop_checkout_dt;
+                    }
+
+                    // how many days between booking notification_date and cancel_base (guest's actual notice)
                     $diffDays = 0;
                     if ($booking_notification_dt instanceof DateTimeImmutable) {
-                        if ($booking_notification_dt <= $booking_cancellation_dt) {
-                            $diffDays = (int)$booking_notification_dt->diff($booking_cancellation_dt)->format('%a');
+                        if ($booking_notification_dt <= $cancel_base) {
+                            $diffDays = (int)$booking_notification_dt->diff($cancel_base)->format('%a');
                         }
                     }
 
                     $adjust = 0;
-                    if($ndays > 0 )
-                    $adjust = max(0, $ndays - $diffDays);
-                    $effective_cancel_end = $booking_cancellation_dt->modify("+{$adjust} days");
+                    if ($ndays > 0) {
+                        $adjust = max(0, $ndays - $diffDays);
+                    }
+                    $effective_cancel_end = $cancel_base->modify("+{$adjust} days");
                 }
 
                 $perProperty[] = [
@@ -324,6 +362,14 @@ if (empty($error)) {
                 }
             }
 
+            // determine which periods were marked paid (persisted in session or from recent POST)
+            $paidPeriodsSelected = [];
+            if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+                $paidPeriodsSelected = $paid_periods_post ?? [];
+            } elseif (!empty($_SESSION['paid_periods_booking_' . $bookingId])) {
+                $paidPeriodsSelected = $_SESSION['paid_periods_booking_' . $bookingId];
+            }
+
             // prepare per-period totals for both "no cancellation" and "with cancellation"
             $periodTotalsNoCancel = []; // each: ['start','end','nights','deposit','service_fee','final_total']
             $periodTotalsWithCancel = [];
@@ -372,6 +418,50 @@ if (empty($error)) {
                     'start' => $ps, 'end' => $pe, 'nights' => null, // we'll show per-property effective nights below if needed
                     'deposit' => $deposit_row_wc, 'service_fee' => $service_wc, 'final_total' => $final_wc
                 ];
+            }
+            // Prepare After-Cancellation (HOST) rows: for each cancelled property, compute cancelled nights (original booking nights after effective_cancel_end)
+            $afterCancelHost = [];
+            $host_totals = ['service_fee' => 0.0, 'final_total' => 0.0];
+            foreach ($perProperty as $pp) {
+                if (($pp['is_cancelled'] ?? 'No') !== 'Yes' || !($pp['effective_cancel_end'] instanceof DateTimeImmutable) || !($checkout_dt instanceof DateTime)) {
+                    continue;
+                }
+                $effEnd = $pp['effective_cancel_end'];
+                $checkout_imm = DateTimeImmutable::createFromMutable($checkout_dt);
+                if ($effEnd >= $checkout_imm) {
+                    continue;
+                }
+
+                // count cancelled nights only from periods marked as paid (refund applies only to paid periods)
+                $cancelled_nights_paid = 0;
+                foreach ($periods as $pi => $prp) {
+                    // only process periods that are marked as paid
+                    if (empty($paidPeriodsSelected) || !in_array($pi, $paidPeriodsSelected, true)) {
+                        continue;
+                    }
+                    $pstart = $prp['start'];
+                    $pend = $prp['end'];
+                    // compute overlap of [effEnd, checkout) with [pstart, pend)
+                    $startForPeriod = $effEnd > $pstart ? $effEnd : $pstart;
+                    $endForPeriod = $pend < $checkout_imm ? $pend : $checkout_imm;
+                    if ($startForPeriod >= $endForPeriod) continue;
+                    $cancelled_nights_paid += $countEligibleNights($startForPeriod, $endForPeriod, $selectedDays, $holidays);
+                }
+
+                if ($cancelled_nights_paid <= 0) {
+                    continue;
+                }
+
+                $final = $pp['night_price'] * $cancelled_nights_paid;
+                $service = (($booking['service_fee'] ?? 'No') === 'Yes') ? ($cancelled_nights_paid * 0.5) : 0.0;
+                $afterCancelHost[] = [
+                    'title' => $pp['title'],
+                    'cancelled_nights' => $cancelled_nights_paid,
+                    'service_fee' => $service,
+                    'final_total' => $final,
+                ];
+                $host_totals['service_fee'] += $service;
+                $host_totals['final_total'] += $final;
             }
             // decide whether to show the "With Cancellation" table: booking has cancellation date and at least one property cancelled
             $showWithCancel = ($booking_cancellation_dt instanceof DateTimeImmutable) && (count(array_filter($perProperty, function($pp){ return ($pp['is_cancelled'] ?? 'No') === 'Yes'; })) > 0);
@@ -583,19 +673,28 @@ if (empty($error)) {
             <div class="card-header">Payment Plan — Without Cancellation</div>
             <div class="card-body">
                 <table class="table table-sm table-bordered">
-                    <thead class="table-light">
-                        <tr>
-                            <th>Period</th>
-                            <th>Deposit (£)</th>
-                            <th>Service Fee (£)</th>
-                            <th>Final Total (£)</th>
-                            <th>Nights</th>
-                        </tr>
-                    </thead>
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Period</th>
+                                    <th>Notify / Due</th>
+                                    <th>Is Paid?</th>
+                                    <th>Deposit (£)</th>
+                                    <th>Service Fee (£)</th>
+                                    <th>Final Total (£)</th>
+                                    <th>Nights</th>
+                                </tr>
+                            </thead>
                     <tbody>
                         <?php foreach ($periodTotalsNoCancel as $i => $row): ?>
                         <tr>
                             <td><?= htmlspecialchars($row['start']->format('d/m/Y') . ' / ' . $row['end']->format('d/m/Y')) ?></td>
+                            <td><?php
+                                $nd = $booking_notify_dt instanceof DateTimeImmutable ? $booking_notify_dt->format('d/m/Y') : '';
+                                $dd = $booking_due_dt instanceof DateTimeImmutable ? $booking_due_dt->format('d/m/Y') : '';
+                                $both = $nd !== '' && $dd !== '' ? $nd . ' / ' . $dd : ($nd !== '' ? $nd : ($dd !== '' ? $dd : ''));
+                                echo htmlspecialchars($both);
+                            ?></td>
+                            <td class="text-center"><input type="checkbox" name="paid_periods[<?= $i ?>]" value="1" <?= in_array($i, $paidPeriodsSelected ?? [], true) ? 'checked' : '' ?>></td>
                             <td>£<?= number_format($row['deposit'], 2) ?></td>
                             <td>£<?= number_format($row['service_fee'], 2) ?></td>
                             <td>£<?= number_format($row['final_total'], 2) ?></td>
@@ -606,6 +705,7 @@ if (empty($error)) {
                     <tfoot>
                         <tr class="fw-bold">
                             <td>Total</td>
+                            <td></td>
                             <td>£<?= number_format(array_sum(array_column($periodTotalsNoCancel, 'deposit')), 2) ?></td>
                             <td>£<?= number_format(array_sum(array_column($periodTotalsNoCancel, 'service_fee')), 2) ?></td>
                             <td>£<?= number_format(array_sum(array_column($periodTotalsNoCancel, 'final_total')), 2) ?></td>
@@ -626,6 +726,7 @@ if (empty($error)) {
                     <thead class="table-light">
                         <tr>
                             <th>Period</th>
+                            <th>Notify / Due</th>
                             <th>Deposit (£)</th>
                             <th>Service Fee (£)</th>
                             <th>Final Total (£)</th>
@@ -638,6 +739,12 @@ if (empty($error)) {
                         ?>
                         <tr>
                             <td><?= htmlspecialchars($pr['start']->format('d/m/Y') . ' / ' . $pr['end']->format('d/m/Y')) ?></td>
+                            <td><?php
+                                $nd = $booking_notify_dt instanceof DateTimeImmutable ? $booking_notify_dt->format('d/m/Y') : '';
+                                $dd = $booking_due_dt instanceof DateTimeImmutable ? $booking_due_dt->format('d/m/Y') : '';
+                                $both = $nd !== '' && $dd !== '' ? $nd . ' / ' . $dd : ($nd !== '' ? $nd : ($dd !== '' ? $dd : ''));
+                                echo htmlspecialchars($both);
+                            ?></td>
                             <td>£<?= number_format($row['deposit'], 2) ?></td>
                             <td>£<?= number_format($row['service_fee'], 2) ?></td>
                             <td>£<?= number_format($row['final_total'], 2) ?></td>
@@ -666,10 +773,48 @@ if (empty($error)) {
                     <tfoot>
                         <tr class="fw-bold">
                             <td>Total</td>
+                            <td></td>
                             <td>£<?= number_format(array_sum(array_column($periodTotalsWithCancel, 'deposit')), 2) ?></td>
                             <td>£<?= number_format(array_sum(array_column($periodTotalsWithCancel, 'service_fee')), 2) ?></td>
                             <td>£<?= number_format(array_sum(array_column($periodTotalsWithCancel, 'final_total')), 2) ?></td>
                             <td></td>
+                        </tr>
+                    </tfoot>
+                </table>
+            </div>
+        </div>
+        <?php endif; ?>
+
+        <?php if (!empty($afterCancelHost) && !empty($paidPeriodsSelected)): ?>
+        <div class="card mb-3">
+            <div class="card-header">After Cancellation: Payment Plans (HOST)</div>
+            <div class="card-body">
+                <p class="small text-muted mb-2">Only properties that were cancelled. Values based on cancelled nights from original booking.</p>
+                <table class="table table-sm table-bordered">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Property</th>
+                            <th>Cancelled Nights</th>
+                            <th>Service Fee (£)</th>
+                            <th>Final Total (£)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($afterCancelHost as $hr): ?>
+                        <tr>
+                            <td><?= htmlspecialchars($hr['title']) ?></td>
+                            <td><?= (int)$hr['cancelled_nights'] ?></td>
+                            <td>£<?= number_format($hr['service_fee'], 2) ?></td>
+                            <td>£<?= number_format($hr['final_total'], 2) ?></td>
+                        </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                    <tfoot>
+                        <tr class="fw-bold">
+                            <td>Total</td>
+                            <td></td>
+                            <td>£<?= number_format($host_totals['service_fee'], 2) ?></td>
+                            <td>£<?= number_format($host_totals['final_total'], 2) ?></td>
                         </tr>
                     </tfoot>
                 </table>
