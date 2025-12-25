@@ -204,14 +204,12 @@ if (empty($error)) {
             $checkin_dt = DateTime::createFromFormat('Y-m-d', $booking['checkin'] ?? '');
             $checkout_dt = DateTime::createFromFormat('Y-m-d', $booking['checkout'] ?? '');
 
-            // Xero invoice schedule: booking-level notify/due dates
-            $booking_notify_dt = null; // notify: checkin - 16 days
-            $booking_due_dt = null;    // due: checkin - 7 days
-            if ($checkin_dt instanceof DateTime) {
-                $checkin_imm = DateTimeImmutable::createFromMutable($checkin_dt);
-                $booking_notify_dt = $checkin_imm->modify('-16 days');
-                $booking_due_dt = $checkin_imm->modify('-7 days');
-            }
+            // Xero invoice schedule: per-period notify/due dates will be
+            // calculated from each payment period's start date when rendering
+            // the tables below. Keep booking-level vars null to avoid
+            // accidental use elsewhere.
+            $booking_notify_dt = null;
+            $booking_due_dt = null;
 
             // booking-level notification / cancellation dates (may be null)
             $booking_notification_dt = DateTime::createFromFormat('Y-m-d', $booking['notification_date'] ?? '');
@@ -689,10 +687,25 @@ if (empty($error)) {
                         <tr>
                             <td><?= htmlspecialchars($row['start']->format('d/m/Y') . ' / ' . $row['end']->format('d/m/Y')) ?></td>
                             <td><?php
-                                $nd = $booking_notify_dt instanceof DateTimeImmutable ? $booking_notify_dt->format('d/m/Y') : '';
-                                $dd = $booking_due_dt instanceof DateTimeImmutable ? $booking_due_dt->format('d/m/Y') : '';
-                                $both = $nd !== '' && $dd !== '' ? $nd . ' / ' . $dd : ($nd !== '' ? $nd : ($dd !== '' ? $dd : ''));
-                                echo htmlspecialchars($both);
+                                $periodStart = $row['start'] ?? null;
+                                if ($periodStart instanceof DateTimeImmutable || $periodStart instanceof DateTime) {
+                                    $periodStartImm = $periodStart instanceof DateTimeImmutable ? $periodStart : DateTimeImmutable::createFromMutable($periodStart);
+                                    $origNotify = $periodStartImm->modify('-16 days');
+                                    $origDue = $periodStartImm->modify('-7 days');
+                                    $notifyReplaced = ($today_dt > $origNotify);
+                                    $dueReplaced = ($today_dt > $origDue);
+                                    $notifyDisplay = $notifyReplaced ? $today_dt : $origNotify;
+                                    $dueDisplay = $dueReplaced ? $today_dt : $origDue;
+                                    $ndStr = htmlspecialchars($notifyDisplay->format('d/m/Y'));
+                                    $ddStr = htmlspecialchars($dueDisplay->format('d/m/Y'));
+                                    if ($notifyReplaced) $ndStr = '<span style="color:green">' . $ndStr . '</span>';
+                                    if ($dueReplaced) $ddStr = '<span style="color:green">' . $ddStr . '</span>';
+                                    if ($ndStr !== '' && $ddStr !== '') {
+                                        echo $ndStr . ' / ' . $ddStr;
+                                    } else {
+                                        echo $ndStr !== '' ? $ndStr : ($ddStr !== '' ? $ddStr : '');
+                                    }
+                                }
                             ?></td>
                             <td class="text-center"><input type="checkbox" name="paid_periods[<?= $i ?>]" value="1" <?= in_array($i, $paidPeriodsSelected ?? [], true) ? 'checked' : '' ?>></td>
                             <td>£<?= number_format($row['deposit'], 2) ?></td>
@@ -705,6 +718,7 @@ if (empty($error)) {
                     <tfoot>
                         <tr class="fw-bold">
                             <td>Total</td>
+                            <td></td>
                             <td></td>
                             <td>£<?= number_format(array_sum(array_column($periodTotalsNoCancel, 'deposit')), 2) ?></td>
                             <td>£<?= number_format(array_sum(array_column($periodTotalsNoCancel, 'service_fee')), 2) ?></td>
@@ -740,10 +754,25 @@ if (empty($error)) {
                         <tr>
                             <td><?= htmlspecialchars($pr['start']->format('d/m/Y') . ' / ' . $pr['end']->format('d/m/Y')) ?></td>
                             <td><?php
-                                $nd = $booking_notify_dt instanceof DateTimeImmutable ? $booking_notify_dt->format('d/m/Y') : '';
-                                $dd = $booking_due_dt instanceof DateTimeImmutable ? $booking_due_dt->format('d/m/Y') : '';
-                                $both = $nd !== '' && $dd !== '' ? $nd . ' / ' . $dd : ($nd !== '' ? $nd : ($dd !== '' ? $dd : ''));
-                                echo htmlspecialchars($both);
+                                $periodStart = $pr['start'] ?? null;
+                                if ($periodStart instanceof DateTimeImmutable || $periodStart instanceof DateTime) {
+                                    $periodStartImm = $periodStart instanceof DateTimeImmutable ? $periodStart : DateTimeImmutable::createFromMutable($periodStart);
+                                    $origNotify = $periodStartImm->modify('-16 days');
+                                    $origDue = $periodStartImm->modify('-7 days');
+                                    $notifyReplaced = ($today_dt > $origNotify);
+                                    $dueReplaced = ($today_dt > $origDue);
+                                    $notifyDisplay = $notifyReplaced ? $today_dt : $origNotify;
+                                    $dueDisplay = $dueReplaced ? $today_dt : $origDue;
+                                    $ndStr = htmlspecialchars($notifyDisplay->format('d/m/Y'));
+                                    $ddStr = htmlspecialchars($dueDisplay->format('d/m/Y'));
+                                    if ($notifyReplaced) $ndStr = '<span style="color:green">' . $ndStr . '</span>';
+                                    if ($dueReplaced) $ddStr = '<span style="color:green">' . $ddStr . '</span>';
+                                    if ($ndStr !== '' && $ddStr !== '') {
+                                        echo $ndStr . ' / ' . $ddStr;
+                                    } else {
+                                        echo $ndStr !== '' ? $ndStr : ($ddStr !== '' ? $ddStr : '');
+                                    }
+                                }
                             ?></td>
                             <td>£<?= number_format($row['deposit'], 2) ?></td>
                             <td>£<?= number_format($row['service_fee'], 2) ?></td>
