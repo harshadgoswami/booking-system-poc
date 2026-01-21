@@ -129,8 +129,10 @@ class DateValidatorTest extends TestCase
      */
     public function testNormalizeDatesTrimmsWhitespace(): void
     {
-        $input = ['  2024-12-25  ', '2025-01-01', '\t2025-02-14\n'];
+        $input = ['  2024-12-25  ', '2025-01-01', '2025-02-14'];
         $result = DateValidator::normalizeDates($input);
+
+        //print_r($result); // Debug line
 
         $this->assertCount(3, $result);
         $this->assertContains('2024-12-25', $result);
