@@ -2,46 +2,49 @@ name: PHPUnit Tests
 
 on:
   push:
-    branches: [ main, master, develop ]
+    branches: [main, master, develop]
   pull_request:
-    branches: [ main, master, develop ]
+    branches: [main, master, develop]
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    
+
     strategy:
       matrix:
-        php-version: ['8.1', '8.2', '8.3']
-    
+        php-version: ["8.1", "8.2", "8.3"]
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Setup PHP ${{ matrix.php-version }}
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php-version }}
           extensions: pdo, pdo_sqlite
           coverage: xdebug
-      
+
       - name: Get Composer cache directory
         id: composer-cache
         run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
-      
+
       - name: Cache Composer dependencies
         uses: actions/cache@v3
         with:
           path: ${{ steps.composer-cache.outputs.dir }}
           key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
           restore-keys: ${{ runner.os }}-composer-
-      
+
       - name: Install dependencies
         run: composer install --prefer-dist --no-progress --no-suggest
-      
-      - name: Run PHPUnit tests
-        run: ./vendor/bin/phpunit --coverage-clover=coverage.xml
-      
+
+      - name: Run PHPUnit tests with coverage
+        run: ./vendor/bin/phpunit --coverage-clover=coverage.xml --coverage-html=coverage
+
+      - name: Verify coverage files generated
+        run: ls -la coverage/ || echo "Coverage directory not found"
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3
         with:
@@ -50,15 +53,10 @@ jobs:
           name: codecov-umbrella
           fail_ci_if_error: false
           verbose: true
-      
-      - name: Generate coverage report
-        if: matrix.php-version == '8.3'
-        run: ./vendor/bin/phpunit --coverage-html=coverage
-      
-      - name: Upload coverage HTML
-        if: matrix.php-version == '8.3'
+
+      - name: Upload coverage HTML report
         uses: actions/upload-artifact@v3
         with:
-          name: coverage-report
+          name: coverage-report-php-${{ matrix.php-version }}
           path: coverage/
           retention-days: 30

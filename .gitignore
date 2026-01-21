@@ -1,6 +1,9 @@
 # Composer dependencies
 vendor/
 
+# Coverage reports
+coverage/
+
 # Environment configuration
 .env
 .env.local
