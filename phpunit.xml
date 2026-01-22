@@ -13,6 +13,11 @@
             <file>tests/HolidayControllerTest.php</file>
             <file>tests/DateValidatorTest.php</file>
         </testsuite>
+        <testsuite name="Booking Management Tests">
+            <file>tests/BookingControllerTest.php</file>
+            <file>tests/EditBookingTest.php</file>
+            <file>tests/PropertyFormTest.php</file>
+        </testsuite>
     </testsuites>
 
     <coverage processUncoveredFiles="true">
